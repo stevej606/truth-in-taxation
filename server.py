@@ -4,23 +4,37 @@ from datetime import datetime
 import os
 import sqlite3
 
-# Try to import pyodbc for SQL Server support
+# Try to import optional database drivers
 try:
     import pyodbc
     HAS_PYODBC = True
 except ImportError:
     HAS_PYODBC = False
 
+try:
+    import psycopg2
+    import psycopg2.extras
+    HAS_PSYCOPG2 = True
+except ImportError:
+    HAS_PSYCOPG2 = False
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 app = Flask(__name__, static_folder=BASE_DIR)
 
-# Database mode: 'sqlserver' if SQL_CONN_STR is set, otherwise 'sqlite'
+# Database mode detection:
+# 1. DATABASE_URL env var -> PostgreSQL (Render)
+# 2. SQL_CONN_STR env var -> SQL Server
+# 3. USE_LOCAL_SQLSERVER=true -> local SQL Server Express
+# 4. fallback -> SQLite
+DATABASE_URL = os.environ.get('DATABASE_URL', '')
 SQL_CONN_STR = os.environ.get('SQL_CONN_STR', '')
-USE_SQLSERVER = bool(SQL_CONN_STR) and HAS_PYODBC
 DB_PATH = os.path.join(BASE_DIR, 'truth_in_taxation.db')
 
-# Default local SQL Server connection (used when no env var and pyodbc is available)
-if not SQL_CONN_STR and HAS_PYODBC and os.environ.get('USE_LOCAL_SQLSERVER', '').lower() == 'true':
+if DATABASE_URL and HAS_PSYCOPG2:
+    DB_MODE = 'postgres'
+elif SQL_CONN_STR and HAS_PYODBC:
+    DB_MODE = 'sqlserver'
+elif HAS_PYODBC and os.environ.get('USE_LOCAL_SQLSERVER', '').lower() == 'true':
     SQL_CONN_STR = (
         r'DRIVER={ODBC Driver 18 for SQL Server};'
         r'SERVER=localhost\SQLEXPRESS;'
@@ -28,7 +42,12 @@ if not SQL_CONN_STR and HAS_PYODBC and os.environ.get('USE_LOCAL_SQLSERVER', '')
         r'Trusted_Connection=yes;'
         r'TrustServerCertificate=yes;'
     )
-    USE_SQLSERVER = True
+    DB_MODE = 'sqlserver'
+else:
+    DB_MODE = 'sqlite'
+
+# PostgreSQL uses %s, SQLite and SQL Server use ?
+PARAM = '%s' if DB_MODE == 'postgres' else '?'
 
 # Add CORS headers to all responses
 @app.after_request
@@ -40,7 +59,9 @@ def after_request(response):
 
 def get_conn():
     """Get a new database connection"""
-    if USE_SQLSERVER:
+    if DB_MODE == 'postgres':
+        return psycopg2.connect(DATABASE_URL)
+    elif DB_MODE == 'sqlserver':
         return pyodbc.connect(SQL_CONN_STR)
     else:
         conn = sqlite3.connect(DB_PATH)
@@ -49,7 +70,10 @@ def get_conn():
 
 def row_to_dict(cursor, row):
     """Convert a row to a dictionary"""
-    if USE_SQLSERVER:
+    if DB_MODE == 'postgres':
+        columns = [desc[0] for desc in cursor.description]
+        return dict(zip(columns, row))
+    elif DB_MODE == 'sqlserver':
         columns = [desc[0] for desc in cursor.description]
         return dict(zip(columns, row))
     else:
@@ -57,131 +81,156 @@ def row_to_dict(cursor, row):
 
 def rows_to_dicts(cursor, rows):
     """Convert rows to a list of dictionaries"""
-    if USE_SQLSERVER:
+    if DB_MODE in ('postgres', 'sqlserver'):
         columns = [desc[0] for desc in cursor.description]
         return [dict(zip(columns, row)) for row in rows]
     else:
         return [dict(row) for row in rows]
 
-def get_last_id(cursor):
-    """Get the last inserted ID"""
-    if USE_SQLSERVER:
-        return cursor.fetchone()[0]
-    else:
-        return cursor.lastrowid
+def p(sql):
+    """Replace ? placeholders with the correct parameter marker for the current DB"""
+    if DB_MODE == 'postgres':
+        return sql.replace('?', '%s')
+    return sql
 
 def init_db():
     """Initialize the database with all necessary tables"""
     conn = get_conn()
     cursor = conn.cursor()
 
-    if USE_SQLSERVER:
-        # SQL Server DDL
+    if DB_MODE == 'sqlserver':
         cursor.execute('''
             IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='tax_rate_calculations' AND xtype='U')
             CREATE TABLE tax_rate_calculations (
                 id INT IDENTITY(1,1) PRIMARY KEY,
-                form_type NVARCHAR(255) NOT NULL,
-                taxing_unit NVARCHAR(255) NOT NULL,
-                county NVARCHAR(255),
-                tax_year NVARCHAR(50),
-                last_year_levy FLOAT,
-                last_year_mo_rate FLOAT,
-                last_year_debt_rate FLOAT,
-                current_total_value FLOAT,
-                new_property_value FLOAT,
-                lost_property_levy FLOAT,
-                proposed_mo_rate FLOAT,
-                proposed_debt_rate FLOAT,
-                total_debt FLOAT,
-                tax_increments FLOAT,
-                is_disaster_area BIT,
-                no_new_revenue_rate FLOAT,
-                voter_approval_rate FLOAT,
-                de_minimis_rate FLOAT,
-                proposed_rate FLOAT,
-                created_at DATETIME DEFAULT GETDATE(),
-                updated_at DATETIME DEFAULT GETDATE()
+                form_type NVARCHAR(255) NOT NULL, taxing_unit NVARCHAR(255) NOT NULL,
+                county NVARCHAR(255), tax_year NVARCHAR(50),
+                last_year_levy FLOAT, last_year_mo_rate FLOAT, last_year_debt_rate FLOAT,
+                current_total_value FLOAT, new_property_value FLOAT, lost_property_levy FLOAT,
+                proposed_mo_rate FLOAT, proposed_debt_rate FLOAT, total_debt FLOAT,
+                tax_increments FLOAT, is_disaster_area BIT,
+                no_new_revenue_rate FLOAT, voter_approval_rate FLOAT,
+                de_minimis_rate FLOAT, proposed_rate FLOAT,
+                created_at DATETIME DEFAULT GETDATE(), updated_at DATETIME DEFAULT GETDATE()
             )
         ''')
         cursor.execute('''
             IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='public_notices' AND xtype='U')
             CREATE TABLE public_notices (
                 id INT IDENTITY(1,1) PRIMARY KEY,
-                notice_type NVARCHAR(255) NOT NULL,
-                form_number NVARCHAR(255),
-                taxing_unit NVARCHAR(255) NOT NULL,
-                proposed_rate FLOAT,
-                no_new_revenue_rate FLOAT,
-                voter_approval_rate FLOAT,
-                meeting_date NVARCHAR(255),
-                meeting_time NVARCHAR(255),
-                meeting_location NVARCHAR(MAX),
-                notice_text NVARCHAR(MAX),
-                created_at DATETIME DEFAULT GETDATE(),
-                updated_at DATETIME DEFAULT GETDATE()
+                notice_type NVARCHAR(255) NOT NULL, form_number NVARCHAR(255),
+                taxing_unit NVARCHAR(255) NOT NULL, proposed_rate FLOAT,
+                no_new_revenue_rate FLOAT, voter_approval_rate FLOAT,
+                meeting_date NVARCHAR(255), meeting_time NVARCHAR(255),
+                meeting_location NVARCHAR(MAX), notice_text NVARCHAR(MAX),
+                created_at DATETIME DEFAULT GETDATE(), updated_at DATETIME DEFAULT GETDATE()
             )
         ''')
         cursor.execute('''
             IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='ballots_petitions' AND xtype='U')
             CREATE TABLE ballots_petitions (
                 id INT IDENTITY(1,1) PRIMARY KEY,
-                ballot_type NVARCHAR(255) NOT NULL,
-                form_number NVARCHAR(255),
-                taxing_unit NVARCHAR(255) NOT NULL,
-                proposed_rate FLOAT,
-                election_date NVARCHAR(255),
-                language NVARCHAR(255),
-                ballot_text NVARCHAR(MAX),
-                created_at DATETIME DEFAULT GETDATE(),
-                updated_at DATETIME DEFAULT GETDATE()
+                ballot_type NVARCHAR(255) NOT NULL, form_number NVARCHAR(255),
+                taxing_unit NVARCHAR(255) NOT NULL, proposed_rate FLOAT,
+                election_date NVARCHAR(255), language NVARCHAR(255), ballot_text NVARCHAR(MAX),
+                created_at DATETIME DEFAULT GETDATE(), updated_at DATETIME DEFAULT GETDATE()
             )
         ''')
         cursor.execute('''
             IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='school_district_forms' AND xtype='U')
             CREATE TABLE school_district_forms (
                 id INT IDENTITY(1,1) PRIMARY KEY,
-                form_type NVARCHAR(255) NOT NULL,
-                form_number NVARCHAR(255),
-                school_district NVARCHAR(255) NOT NULL,
-                county NVARCHAR(255),
-                tax_year NVARCHAR(50),
-                current_value FLOAT,
-                mo_portion FLOAT,
-                debt_portion FLOAT,
-                total_rate FLOAT,
-                has_chapter_313 BIT,
-                created_at DATETIME DEFAULT GETDATE(),
-                updated_at DATETIME DEFAULT GETDATE()
+                form_type NVARCHAR(255) NOT NULL, form_number NVARCHAR(255),
+                school_district NVARCHAR(255) NOT NULL, county NVARCHAR(255), tax_year NVARCHAR(50),
+                current_value FLOAT, mo_portion FLOAT, debt_portion FLOAT,
+                total_rate FLOAT, has_chapter_313 BIT,
+                created_at DATETIME DEFAULT GETDATE(), updated_at DATETIME DEFAULT GETDATE()
             )
         ''')
         cursor.execute('''
             IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='water_district_forms' AND xtype='U')
             CREATE TABLE water_district_forms (
                 id INT IDENTITY(1,1) PRIMARY KEY,
-                district_type NVARCHAR(255) NOT NULL,
-                form_number NVARCHAR(255),
-                district_name NVARCHAR(255) NOT NULL,
-                county NVARCHAR(255),
-                tax_year NVARCHAR(50),
-                proposed_rate FLOAT,
-                hearing_date NVARCHAR(255),
-                hearing_time NVARCHAR(255),
+                district_type NVARCHAR(255) NOT NULL, form_number NVARCHAR(255),
+                district_name NVARCHAR(255) NOT NULL, county NVARCHAR(255), tax_year NVARCHAR(50),
+                proposed_rate FLOAT, hearing_date NVARCHAR(255), hearing_time NVARCHAR(255),
                 hearing_location NVARCHAR(MAX),
-                created_at DATETIME DEFAULT GETDATE(),
-                updated_at DATETIME DEFAULT GETDATE()
+                created_at DATETIME DEFAULT GETDATE(), updated_at DATETIME DEFAULT GETDATE()
             )
         ''')
         cursor.execute('''
             IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='form_submissions_log' AND xtype='U')
             CREATE TABLE form_submissions_log (
                 id INT IDENTITY(1,1) PRIMARY KEY,
-                form_category NVARCHAR(255) NOT NULL,
-                form_id INT,
-                action NVARCHAR(255) NOT NULL,
-                user_info NVARCHAR(MAX),
-                ip_address NVARCHAR(255),
-                submitted_at DATETIME DEFAULT GETDATE()
+                form_category NVARCHAR(255) NOT NULL, form_id INT,
+                action NVARCHAR(255) NOT NULL, user_info NVARCHAR(MAX),
+                ip_address NVARCHAR(255), submitted_at DATETIME DEFAULT GETDATE()
+            )
+        ''')
+    elif DB_MODE == 'postgres':
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS tax_rate_calculations (
+                id SERIAL PRIMARY KEY,
+                form_type VARCHAR(255) NOT NULL, taxing_unit VARCHAR(255) NOT NULL,
+                county VARCHAR(255), tax_year VARCHAR(50),
+                last_year_levy DOUBLE PRECISION, last_year_mo_rate DOUBLE PRECISION,
+                last_year_debt_rate DOUBLE PRECISION, current_total_value DOUBLE PRECISION,
+                new_property_value DOUBLE PRECISION, lost_property_levy DOUBLE PRECISION,
+                proposed_mo_rate DOUBLE PRECISION, proposed_debt_rate DOUBLE PRECISION,
+                total_debt DOUBLE PRECISION, tax_increments DOUBLE PRECISION,
+                is_disaster_area BOOLEAN,
+                no_new_revenue_rate DOUBLE PRECISION, voter_approval_rate DOUBLE PRECISION,
+                de_minimis_rate DOUBLE PRECISION, proposed_rate DOUBLE PRECISION,
+                created_at TIMESTAMP DEFAULT NOW(), updated_at TIMESTAMP DEFAULT NOW()
+            )
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS public_notices (
+                id SERIAL PRIMARY KEY,
+                notice_type VARCHAR(255) NOT NULL, form_number VARCHAR(255),
+                taxing_unit VARCHAR(255) NOT NULL, proposed_rate DOUBLE PRECISION,
+                no_new_revenue_rate DOUBLE PRECISION, voter_approval_rate DOUBLE PRECISION,
+                meeting_date VARCHAR(255), meeting_time VARCHAR(255),
+                meeting_location TEXT, notice_text TEXT,
+                created_at TIMESTAMP DEFAULT NOW(), updated_at TIMESTAMP DEFAULT NOW()
+            )
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS ballots_petitions (
+                id SERIAL PRIMARY KEY,
+                ballot_type VARCHAR(255) NOT NULL, form_number VARCHAR(255),
+                taxing_unit VARCHAR(255) NOT NULL, proposed_rate DOUBLE PRECISION,
+                election_date VARCHAR(255), language VARCHAR(255), ballot_text TEXT,
+                created_at TIMESTAMP DEFAULT NOW(), updated_at TIMESTAMP DEFAULT NOW()
+            )
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS school_district_forms (
+                id SERIAL PRIMARY KEY,
+                form_type VARCHAR(255) NOT NULL, form_number VARCHAR(255),
+                school_district VARCHAR(255) NOT NULL, county VARCHAR(255), tax_year VARCHAR(50),
+                current_value DOUBLE PRECISION, mo_portion DOUBLE PRECISION,
+                debt_portion DOUBLE PRECISION, total_rate DOUBLE PRECISION,
+                has_chapter_313 BOOLEAN,
+                created_at TIMESTAMP DEFAULT NOW(), updated_at TIMESTAMP DEFAULT NOW()
+            )
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS water_district_forms (
+                id SERIAL PRIMARY KEY,
+                district_type VARCHAR(255) NOT NULL, form_number VARCHAR(255),
+                district_name VARCHAR(255) NOT NULL, county VARCHAR(255), tax_year VARCHAR(50),
+                proposed_rate DOUBLE PRECISION, hearing_date VARCHAR(255),
+                hearing_time VARCHAR(255), hearing_location TEXT,
+                created_at TIMESTAMP DEFAULT NOW(), updated_at TIMESTAMP DEFAULT NOW()
+            )
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS form_submissions_log (
+                id SERIAL PRIMARY KEY,
+                form_category VARCHAR(255) NOT NULL, form_id INTEGER,
+                action VARCHAR(255) NOT NULL, user_info TEXT,
+                ip_address VARCHAR(255), submitted_at TIMESTAMP DEFAULT NOW()
             )
         ''')
     else:
@@ -189,25 +238,14 @@ def init_db():
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS tax_rate_calculations (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                form_type TEXT NOT NULL,
-                taxing_unit TEXT NOT NULL,
-                county TEXT,
-                tax_year TEXT,
-                last_year_levy REAL,
-                last_year_mo_rate REAL,
-                last_year_debt_rate REAL,
-                current_total_value REAL,
-                new_property_value REAL,
-                lost_property_levy REAL,
-                proposed_mo_rate REAL,
-                proposed_debt_rate REAL,
-                total_debt REAL,
-                tax_increments REAL,
-                is_disaster_area BOOLEAN,
-                no_new_revenue_rate REAL,
-                voter_approval_rate REAL,
-                de_minimis_rate REAL,
-                proposed_rate REAL,
+                form_type TEXT NOT NULL, taxing_unit TEXT NOT NULL,
+                county TEXT, tax_year TEXT,
+                last_year_levy REAL, last_year_mo_rate REAL, last_year_debt_rate REAL,
+                current_total_value REAL, new_property_value REAL, lost_property_levy REAL,
+                proposed_mo_rate REAL, proposed_debt_rate REAL, total_debt REAL,
+                tax_increments REAL, is_disaster_area BOOLEAN,
+                no_new_revenue_rate REAL, voter_approval_rate REAL,
+                de_minimis_rate REAL, proposed_rate REAL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
@@ -215,16 +253,11 @@ def init_db():
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS public_notices (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                notice_type TEXT NOT NULL,
-                form_number TEXT,
-                taxing_unit TEXT NOT NULL,
-                proposed_rate REAL,
-                no_new_revenue_rate REAL,
-                voter_approval_rate REAL,
-                meeting_date TEXT,
-                meeting_time TEXT,
-                meeting_location TEXT,
-                notice_text TEXT,
+                notice_type TEXT NOT NULL, form_number TEXT,
+                taxing_unit TEXT NOT NULL, proposed_rate REAL,
+                no_new_revenue_rate REAL, voter_approval_rate REAL,
+                meeting_date TEXT, meeting_time TEXT,
+                meeting_location TEXT, notice_text TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
@@ -232,13 +265,9 @@ def init_db():
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS ballots_petitions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ballot_type TEXT NOT NULL,
-                form_number TEXT,
-                taxing_unit TEXT NOT NULL,
-                proposed_rate REAL,
-                election_date TEXT,
-                language TEXT,
-                ballot_text TEXT,
+                ballot_type TEXT NOT NULL, form_number TEXT,
+                taxing_unit TEXT NOT NULL, proposed_rate REAL,
+                election_date TEXT, language TEXT, ballot_text TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
@@ -246,16 +275,10 @@ def init_db():
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS school_district_forms (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                form_type TEXT NOT NULL,
-                form_number TEXT,
-                school_district TEXT NOT NULL,
-                county TEXT,
-                tax_year TEXT,
-                current_value REAL,
-                mo_portion REAL,
-                debt_portion REAL,
-                total_rate REAL,
-                has_chapter_313 BOOLEAN,
+                form_type TEXT NOT NULL, form_number TEXT,
+                school_district TEXT NOT NULL, county TEXT, tax_year TEXT,
+                current_value REAL, mo_portion REAL, debt_portion REAL,
+                total_rate REAL, has_chapter_313 BOOLEAN,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
@@ -263,14 +286,9 @@ def init_db():
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS water_district_forms (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                district_type TEXT NOT NULL,
-                form_number TEXT,
-                district_name TEXT NOT NULL,
-                county TEXT,
-                tax_year TEXT,
-                proposed_rate REAL,
-                hearing_date TEXT,
-                hearing_time TEXT,
+                district_type TEXT NOT NULL, form_number TEXT,
+                district_name TEXT NOT NULL, county TEXT, tax_year TEXT,
+                proposed_rate REAL, hearing_date TEXT, hearing_time TEXT,
                 hearing_location TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -279,25 +297,24 @@ def init_db():
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS form_submissions_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                form_category TEXT NOT NULL,
-                form_id INTEGER,
-                action TEXT NOT NULL,
-                user_info TEXT,
-                ip_address TEXT,
-                submitted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                form_category TEXT NOT NULL, form_id INTEGER,
+                action TEXT NOT NULL, user_info TEXT,
+                ip_address TEXT, submitted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
 
     conn.commit()
     conn.close()
-    mode = "SQL Server" if USE_SQLSERVER else "SQLite"
-    print(f"Database initialized successfully ({mode})")
+    print(f"Database initialized successfully ({DB_MODE})")
 
 def insert_and_get_id(cursor, sql, params):
-    """Insert a row and return the new ID, handling both SQL Server and SQLite"""
-    if USE_SQLSERVER:
-        # Add OUTPUT clause before VALUES
+    """Insert a row and return the new ID"""
+    if DB_MODE == 'sqlserver':
         sql = sql.replace(') VALUES', ') OUTPUT INSERTED.id VALUES')
+        cursor.execute(sql, params)
+        return cursor.fetchone()[0]
+    elif DB_MODE == 'postgres':
+        sql = p(sql.rstrip().rstrip(')') + ') RETURNING id')
         cursor.execute(sql, params)
         return cursor.fetchone()[0]
     else:
@@ -340,31 +357,21 @@ def save_tax_rate_calculation():
                 no_new_revenue_rate, voter_approval_rate, de_minimis_rate, proposed_rate
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
-            data.get('formType'),
-            data.get('taxingUnit'),
-            data.get('county'),
-            data.get('taxYear'),
-            data.get('lastYearLevy'),
-            data.get('lastYearMORate'),
-            data.get('lastYearDebtRate'),
-            data.get('currentTotalValue'),
-            data.get('newPropertyValue'),
-            data.get('lostPropertyLevy'),
-            data.get('proposedMORate'),
-            data.get('proposedDebtRate'),
-            data.get('totalDebt'),
-            data.get('taxIncrements'),
-            data.get('isDisasterArea'),
-            data.get('noNewRevenueRate'),
-            data.get('voterApprovalRate'),
-            data.get('deMinimisRate'),
+            data.get('formType'), data.get('taxingUnit'), data.get('county'),
+            data.get('taxYear'), data.get('lastYearLevy'), data.get('lastYearMORate'),
+            data.get('lastYearDebtRate'), data.get('currentTotalValue'),
+            data.get('newPropertyValue'), data.get('lostPropertyLevy'),
+            data.get('proposedMORate'), data.get('proposedDebtRate'),
+            data.get('totalDebt'), data.get('taxIncrements'),
+            data.get('isDisasterArea'), data.get('noNewRevenueRate'),
+            data.get('voterApprovalRate'), data.get('deMinimisRate'),
             data.get('proposedRate')
         ))
 
-        cursor.execute('''
+        cursor.execute(p('''
             INSERT INTO form_submissions_log (form_category, form_id, action, ip_address)
             VALUES (?, ?, ?, ?)
-        ''', ('tax_rate_calculation', form_id, 'create', request.remote_addr))
+        '''), ('tax_rate_calculation', form_id, 'create', request.remote_addr))
 
         conn.commit()
         conn.close()
@@ -392,22 +399,17 @@ def save_public_notice():
                 meeting_time, meeting_location, notice_text
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
-            data.get('noticeType'),
-            data.get('formNumber'),
-            data.get('taxingUnit'),
-            data.get('proposedRate'),
-            data.get('noNewRevenueRate'),
-            data.get('voterApprovalRate'),
-            data.get('meetingDate'),
-            data.get('meetingTime'),
-            data.get('meetingLocation'),
+            data.get('noticeType'), data.get('formNumber'), data.get('taxingUnit'),
+            data.get('proposedRate'), data.get('noNewRevenueRate'),
+            data.get('voterApprovalRate'), data.get('meetingDate'),
+            data.get('meetingTime'), data.get('meetingLocation'),
             data.get('noticeText')
         ))
 
-        cursor.execute('''
+        cursor.execute(p('''
             INSERT INTO form_submissions_log (form_category, form_id, action, ip_address)
             VALUES (?, ?, ?, ?)
-        ''', ('public_notice', form_id, 'create', request.remote_addr))
+        '''), ('public_notice', form_id, 'create', request.remote_addr))
 
         conn.commit()
         conn.close()
@@ -434,19 +436,15 @@ def save_ballot_petition():
                 election_date, language, ballot_text
             ) VALUES (?, ?, ?, ?, ?, ?, ?)
         ''', (
-            data.get('ballotType'),
-            data.get('formNumber'),
-            data.get('taxingUnit'),
-            data.get('proposedRate'),
-            data.get('electionDate'),
-            data.get('language'),
-            data.get('ballotText')
+            data.get('ballotType'), data.get('formNumber'), data.get('taxingUnit'),
+            data.get('proposedRate'), data.get('electionDate'),
+            data.get('language'), data.get('ballotText')
         ))
 
-        cursor.execute('''
+        cursor.execute(p('''
             INSERT INTO form_submissions_log (form_category, form_id, action, ip_address)
             VALUES (?, ?, ?, ?)
-        ''', ('ballot_petition', form_id, 'create', request.remote_addr))
+        '''), ('ballot_petition', form_id, 'create', request.remote_addr))
 
         conn.commit()
         conn.close()
@@ -473,22 +471,16 @@ def save_school_district():
                 current_value, mo_portion, debt_portion, total_rate, has_chapter_313
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
-            data.get('formType'),
-            data.get('formNumber'),
-            data.get('schoolDistrict'),
-            data.get('county'),
-            data.get('taxYear'),
-            data.get('currentValue'),
-            data.get('moPortion'),
-            data.get('debtPortion'),
-            data.get('totalRate'),
-            data.get('hasChapter313')
+            data.get('formType'), data.get('formNumber'), data.get('schoolDistrict'),
+            data.get('county'), data.get('taxYear'), data.get('currentValue'),
+            data.get('moPortion'), data.get('debtPortion'),
+            data.get('totalRate'), data.get('hasChapter313')
         ))
 
-        cursor.execute('''
+        cursor.execute(p('''
             INSERT INTO form_submissions_log (form_category, form_id, action, ip_address)
             VALUES (?, ?, ?, ?)
-        ''', ('school_district', form_id, 'create', request.remote_addr))
+        '''), ('school_district', form_id, 'create', request.remote_addr))
 
         conn.commit()
         conn.close()
@@ -515,21 +507,16 @@ def save_water_district():
                 proposed_rate, hearing_date, hearing_time, hearing_location
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
-            data.get('districtType'),
-            data.get('formNumber'),
-            data.get('districtName'),
-            data.get('county'),
-            data.get('taxYear'),
-            data.get('proposedRate'),
-            data.get('hearingDate'),
-            data.get('hearingTime'),
+            data.get('districtType'), data.get('formNumber'), data.get('districtName'),
+            data.get('county'), data.get('taxYear'), data.get('proposedRate'),
+            data.get('hearingDate'), data.get('hearingTime'),
             data.get('hearingLocation')
         ))
 
-        cursor.execute('''
+        cursor.execute(p('''
             INSERT INTO form_submissions_log (form_category, form_id, action, ip_address)
             VALUES (?, ?, ?, ?)
-        ''', ('water_district', form_id, 'create', request.remote_addr))
+        '''), ('water_district', form_id, 'create', request.remote_addr))
 
         conn.commit()
         conn.close()
@@ -629,7 +616,7 @@ def get_submission_by_id(category, id):
         if not table_name:
             return jsonify({"status": "error", "message": "Invalid category"}), 400
 
-        cursor.execute(f'SELECT * FROM {table_name} WHERE id = ?', (id,))
+        cursor.execute(p(f'SELECT * FROM {table_name} WHERE id = ?'), (id,))
         result = cursor.fetchone()
 
         conn.close()
@@ -663,12 +650,12 @@ def delete_submission(category, id):
         if not table_name:
             return jsonify({"status": "error", "message": "Invalid category"}), 400
 
-        cursor.execute(f'DELETE FROM {table_name} WHERE id = ?', (id,))
+        cursor.execute(p(f'DELETE FROM {table_name} WHERE id = ?'), (id,))
 
-        cursor.execute('''
+        cursor.execute(p('''
             INSERT INTO form_submissions_log (form_category, form_id, action, ip_address)
             VALUES (?, ?, ?, ?)
-        ''', (category, id, 'delete', request.remote_addr))
+        '''), (category, id, 'delete', request.remote_addr))
 
         conn.commit()
         conn.close()
@@ -719,7 +706,6 @@ def get_statistics():
 if __name__ == '__main__':
     init_db()
     port = int(os.environ.get('PORT', 5000))
-    mode = "SQL Server" if USE_SQLSERVER else "SQLite"
-    print(f"Starting Truth-in-Taxation API Server ({mode})...")
+    print(f"Starting Truth-in-Taxation API Server ({DB_MODE})...")
     print(f"Running on port {port}")
     app.run(host='0.0.0.0', port=port, debug=os.environ.get('FLASK_DEBUG', 'true').lower() == 'true')

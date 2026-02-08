@@ -1,3 +1,8 @@
+databases:
+  - name: truth-in-taxation-db
+    plan: free
+    databaseName: truth_in_taxation
+
 services:
   - type: web
     name: truth-in-taxation
@@ -9,3 +14,7 @@ services:
         value: false
       - key: PYTHON_VERSION
         value: 3.11.6
+      - key: DATABASE_URL
+        fromDatabase:
+          name: truth-in-taxation-db
+          property: connectionString
