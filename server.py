@@ -703,8 +703,10 @@ def get_statistics():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
+# Initialize database tables on module load (works with both gunicorn and direct run)
+init_db()
+
 if __name__ == '__main__':
-    init_db()
     port = int(os.environ.get('PORT', 5000))
     print(f"Starting Truth-in-Taxation API Server ({DB_MODE})...")
     print(f"Running on port {port}")
