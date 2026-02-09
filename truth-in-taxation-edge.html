@@ -954,7 +954,7 @@
                 const result = await apiCall('/tax-rate-calculation', 'POST', formData);
                 
                 if (result.status === 'success') {
-                    alert(`âœ… Tax rate calculation saved successfully!\nRecord ID: ${result.id}`);
+                    alert(`\u2705 Tax rate calculation saved successfully!\nRecord ID: ${result.id}`);
                 } else {
                     alert(`âŒ Error saving to database: ${result.message}`);
                 }
@@ -1423,7 +1423,7 @@
                             {proposedRate > voterApprovalRate && (
                                 <div style={{marginTop: '16px', padding: '12px', background: 'rgba(255,255,255,0.2)', borderRadius: '8px'}}>
                                     <p style={{fontSize: '14px'}}>
-                                        âš ï¸ <strong>Notice:</strong> The proposed rate exceeds the voter-approval rate. 
+                                        &#9888; <strong>Notice:</strong> The proposed rate exceeds the voter-approval rate. 
                                         An election may be required.
                                     </p>
                                 </div>
@@ -1522,7 +1522,7 @@
                 const result = await apiCall('/public-notice', 'POST', noticeData);
                 
                 if (result.status === 'success') {
-                    alert(`âœ… Public notice saved successfully!\nRecord ID: ${result.id}`);
+                    alert(`\u2705 Public notice saved successfully!\nRecord ID: ${result.id}`);
                 } else {
                     alert(`âŒ Error saving to database: ${result.message}`);
                 }
@@ -1821,7 +1821,7 @@ to seek voter approval of the rate.
                 const result = await apiCall('/ballot-petition', 'POST', ballotData);
                 
                 if (result.status === 'success') {
-                    alert(`âœ… Ballot/Petition saved successfully!\nRecord ID: ${result.id}`);
+                    alert(`\u2705 Ballot/Petition saved successfully!\nRecord ID: ${result.id}`);
                 } else {
                     alert(`âŒ Error saving to database: ${result.message}`);
                 }
@@ -2077,7 +2077,7 @@ to seek voter approval of the rate.
                 const result = await apiCall('/school-district', 'POST', schoolData);
                 
                 if (result.status === 'success') {
-                    alert(`âœ… School district form saved successfully!\nRecord ID: ${result.id}`);
+                    alert(`\u2705 School district form saved successfully!\nRecord ID: ${result.id}`);
                 } else {
                     alert(`âŒ Error saving to database: ${result.message}`);
                 }
@@ -2278,7 +2278,7 @@ to seek voter approval of the rate.
                     {hasChapter313 && (
                         <div className="warning-box">
                             <p>
-                                <strong>âš ï¸ Chapter 313/JETI Notice:</strong> This district has Chapter 313 or JETI agreements. 
+                                <strong>&#9888; Chapter 313/JETI Notice:</strong> This district has Chapter 313 or JETI agreements. 
                                 Use Form 50-884 for the tax rate calculation worksheet. Additional reporting requirements 
                                 apply for value limitation agreements.
                             </p>
@@ -2357,7 +2357,7 @@ to seek voter approval of the rate.
                 const result = await apiCall('/water-district', 'POST', waterData);
                 
                 if (result.status === 'success') {
-                    alert(`âœ… Water district form saved successfully!\nRecord ID: ${result.id}`);
+                    alert(`\u2705 Water district form saved successfully!\nRecord ID: ${result.id}`);
                 } else {
                     alert(`âŒ Error saving to database: ${result.message}`);
                 }
